@@ -29,14 +29,15 @@ CALLMEBOT_PHONE    = os.environ.get("CALLMEBOT_PHONE", "").strip()
 CALLMEBOT_APIKEY   = os.environ.get("CALLMEBOT_APIKEY", "").strip()
 
 NEGATIVE_PATTERNS = [
-    r"kein[e]?\s+frei[en]*\s+termin",
-    r"keine\s+termine",
+    r"kein\s+freier?\s+termin",       # "Kein freier Termin verfügbar"
+    r"kein\s+termin\s+verf",          # "kein Termin verfügbar"
+    r"keine\s+zeiten\s+verf",         # "Keine Zeiten verfügbar" (step heading)
+    r"keine\s+freien\s+zeiten",
+    r"keine\s+termine\s+(verf|frei|verfügbar)",
+    r"leider\s+kein",                 # "ist leider kein Termin verfügbar"
     r"derzeit\s+keine",
     r"aktuell\s+keine",
-    r"leider\s+sind\s+(aktuell|derzeit|momentan)?\s*keine",
     r"no\s+appointments?\s+available",
-    r"keine\s+freien\s+zeiten",
-    r"zur\s+zeit\s+keine",
 ]
 
 
