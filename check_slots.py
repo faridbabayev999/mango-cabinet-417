@@ -23,10 +23,10 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 ART_DIR    = pathlib.Path(os.environ.get("ARTIFACT_DIR", "artifacts"))
 ART_DIR.mkdir(parents=True, exist_ok=True)
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-CALLMEBOT_PHONE    = os.environ.get("CALLMEBOT_PHONE", "")
-CALLMEBOT_APIKEY   = os.environ.get("CALLMEBOT_APIKEY", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+CALLMEBOT_PHONE    = os.environ.get("CALLMEBOT_PHONE", "").strip()
+CALLMEBOT_APIKEY   = os.environ.get("CALLMEBOT_APIKEY", "").strip()
 
 NEGATIVE_PATTERNS = [
     r"kein[e]?\s+frei[en]*\s+termin",
@@ -111,6 +111,34 @@ def dump_page(page, tag):
         return ""
 
 
+def click_exact(page, label):
+    """Click the first visible, enabled control whose trimmed text/value is EXACTLY `label`."""
+    try:
+        res = page.evaluate(
+            "(lab) => {"
+            "  const c=[...document.querySelectorAll("
+            "'button,input[type=submit],input[type=button],a,[role=button]')];"
+            "  const vis=e=>e.offsetParent!==null && !e.disabled;"
+            "  const el=c.find(e=>((e.value||e.textContent||'').trim()===lab) && vis(e));"
+            "  if(el){el.click(); return (el.id||el.tagName);}"
+            "  return '';"
+            "}", label)
+        if res:
+            log(f"Clicked '{label}' ({res}).")
+            return True
+        return False
+    except Exception as e:
+        log(f"click_exact('{label}') error:", e)
+        return False
+
+
+def click_weiter(page):
+    if click_exact(page, "Weiter"):
+        return True
+    log("No exact 'Weiter' control found.")
+    return False
+
+
 def click_by_text(page, needle, timeout=8000):
     needle_l = needle.lower()
     for sel in ["button", "a", "[role=button]", "[role=option]", "label", "li"]:
@@ -131,28 +159,6 @@ def click_by_text(page, needle, timeout=8000):
                     except Exception:
                         continue
     return False
-
-
-def click_weiter(page):
-    """Click the real 'Weiter' button, NOT the skip-link that also says Weiter."""
-    try:
-        res = page.evaluate(
-            "() => {"
-            "  const c=[...document.querySelectorAll("
-            "'button,input[type=submit],input[type=button],a,[role=button]')];"
-            "  const vis=e=>e.offsetParent!==null && !e.disabled;"
-            "  let el=c.find(e=>((e.value||e.textContent||'').trim()==='Weiter') && vis(e));"
-            "  if(el){el.click(); return (el.id||el.tagName);}"
-            "  return '';"
-            "}")
-        if res:
-            log(f"Clicked Weiter ({res}).")
-            return True
-        log("No exact 'Weiter' control found.")
-        return False
-    except Exception as e:
-        log("click_weiter error:", e)
-        return False
 
 
 def expand_category(page, category):
@@ -184,7 +190,6 @@ def expand_category(page, category):
 
 
 def select_concern(page, chosen):
-    """Click the concern's dedicated plus button (data-type='plus') to set count=1."""
     selected = False
     try:
         label = page.locator(f"label[aria-label={json.dumps(chosen)}]").first
@@ -240,10 +245,6 @@ def select_concern(page, chosen):
         click_by_text(page, chosen)
 
     page.wait_for_timeout(1000)
-    if click_by_text(page, "OK", timeout=2500):
-        log("Confirmed document popup with OK.")
-        page.wait_for_timeout(800)
-
     try:
         ov = page.inner_text("body").lower()
         if f"0 anliegen {chosen.lower()} ausgewählt" in ov:
@@ -287,21 +288,37 @@ def text_has_negative(txt):
     return any(re.search(p, t) for p in NEGATIVE_PATTERNS)
 
 
+TIME_RE = re.compile(r"\b\d{1,2}[:.]\d{2}\b")
+DATE_RE = re.compile(r"\b\d{1,2}\.\d{1,2}\.(\d{2,4})?\b")
+IGNORE_SLOT_TEXT = {"ok", "weiter", "abbrechen", "schliessen", "schließen", "x", "×"}
+
+
 def find_available_dates(page):
     dates = []
-    for sel in ["td.buchbar", "td.frei", ".available", ".bookable",
-                "button[aria-disabled=false]", "a.suggestion", ".suggestion",
-                "td[role=gridcell]:not([aria-disabled=true])",
-                "button.timeslot", ".timeslot:not(.disabled)"]:
+    for sel in ["td.buchbar", "td.frei", ".buchbar", ".frei",
+                "a.suggestion", ".suggestion", "button.timeslot",
+                ".timeslot:not(.disabled)", "[class*='termin'] a",
+                "a[href*='select']", "a[onclick*='termin']"]:
         try:
             for el in page.query_selector_all(sel):
                 if not el.is_visible():
                     continue
                 t = (el.inner_text() or el.get_attribute("aria-label") or "").strip()
-                if t:
+                if t and t.lower() not in IGNORE_SLOT_TEXT:
                     dates.append(t)
         except Exception:
             pass
+    try:
+        for el in page.query_selector_all("a, button, td, li"):
+            if not el.is_visible():
+                continue
+            t = (el.inner_text() or "").strip()
+            if not t or t.lower() in IGNORE_SLOT_TEXT or len(t) > 40:
+                continue
+            if TIME_RE.search(t) or DATE_RE.search(t):
+                dates.append(t)
+    except Exception:
+        pass
     seen, uniq = set(), []
     for d in dates:
         if d not in seen:
@@ -384,24 +401,34 @@ def run():
                 log("weiter cand error:", e)
 
         click_weiter(page)
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(2000)
 
-        for _ in range(4):
-            body_low = page.inner_text("body").lower()
-            if ("terminauswahl" in body_low or "schritt 3" in body_low
-                    or text_has_negative(body_low) or find_available_dates(page)):
+        # Walk through the confirmation modal (OK) and any Standort step until
+        # the appointment view (Schritt 3 / Terminauswahl) or a 'no slots' note.
+        for stp in range(6):
+            low = page.inner_text("body").lower()
+            if ("schritt 3" in low or "terminauswahl" in low
+                    or "terminvorschl" in low or text_has_negative(low)):
+                log(f"Reached appointment view after {stp} step(s).")
                 break
-            dump_page(page, "step2c_intermediate")
-            click_by_text(page, "Super C", timeout=1500)
+            dump_page(page, f"step2c_advance{stp}")
+            if click_exact(page, "OK"):
+                log("Clicked OK (modal).")
+                page.wait_for_timeout(2000)
+                continue
+            if click_by_text(page, "Super C", timeout=1500):
+                log("Selected Super C location.")
+                page.wait_for_timeout(1000)
             if not click_weiter(page):
+                log("No further 'Weiter' — stopping advance.")
                 break
             page.wait_for_timeout(2000)
 
         page.wait_for_timeout(1500)
         cal_text = dump_page(page, "step3_calendar")
         if DISCOVERY:
-            log("=== STEP 3 page text (first 2000 chars) ===")
-            log(cal_text[:2000])
+            log("=== STEP 3 page text (first 2500 chars) ===")
+            log(cal_text[:2500])
 
         negative = text_has_negative(cal_text)
         dates = find_available_dates(page)
