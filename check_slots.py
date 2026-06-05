@@ -133,6 +133,28 @@ def click_by_text(page, needle, timeout=8000):
     return False
 
 
+def click_weiter(page):
+    """Click the real 'Weiter' button, NOT the skip-link that also says Weiter."""
+    try:
+        res = page.evaluate(
+            "() => {"
+            "  const c=[...document.querySelectorAll("
+            "'button,input[type=submit],input[type=button],a,[role=button]')];"
+            "  const vis=e=>e.offsetParent!==null && !e.disabled;"
+            "  let el=c.find(e=>((e.value||e.textContent||'').trim()==='Weiter') && vis(e));"
+            "  if(el){el.click(); return (el.id||el.tagName);}"
+            "  return '';"
+            "}")
+        if res:
+            log(f"Clicked Weiter ({res}).")
+            return True
+        log("No exact 'Weiter' control found.")
+        return False
+    except Exception as e:
+        log("click_weiter error:", e)
+        return False
+
+
 def expand_category(page, category):
     if not category:
         return
@@ -162,9 +184,7 @@ def expand_category(page, category):
 
 
 def select_concern(page, chosen):
-    """TEVIS number spinner: each concern has a minus button, a number input
-    (id=input-N, name=cnc-N), and a plus button (data-type='plus'). Click the
-    PLUS for this concern to set its count to 1."""
+    """Click the concern's dedicated plus button (data-type='plus') to set count=1."""
     selected = False
     try:
         label = page.locator(f"label[aria-label={json.dumps(chosen)}]").first
@@ -322,7 +342,7 @@ def run():
         else:
             log(f"Could not find authority '{AUTHORITY_MATCH}'.")
 
-        click_by_text(page, "Weiter", timeout=2500)
+        click_weiter(page)
         page.wait_for_timeout(2000)
 
         dump_page(page, "step2_concern")
@@ -351,16 +371,29 @@ def run():
         log(f"Selecting concern: {chosen}")
         select_concern(page, chosen)
         page.wait_for_timeout(1000)
-        click_by_text(page, "Weiter", timeout=4000)
+
+        if DISCOVERY:
+            try:
+                cand = page.evaluate(
+                    "() => [...document.querySelectorAll('button,input,a')]"
+                    ".filter(e=>/eiter/i.test((e.value||'')+(e.textContent||'')"
+                    "+(e.id||'')+(e.className||'')))"
+                    ".map(e=>e.outerHTML.slice(0,160))")
+                log("WEITER CANDIDATES:", cand)
+            except Exception as e:
+                log("weiter cand error:", e)
+
+        click_weiter(page)
         page.wait_for_timeout(2500)
 
-        for _ in range(3):
+        for _ in range(4):
             body_low = page.inner_text("body").lower()
             if ("terminauswahl" in body_low or "schritt 3" in body_low
                     or text_has_negative(body_low) or find_available_dates(page)):
                 break
+            dump_page(page, "step2c_intermediate")
             click_by_text(page, "Super C", timeout=1500)
-            if not click_by_text(page, "Weiter", timeout=2500):
+            if not click_weiter(page):
                 break
             page.wait_for_timeout(2000)
 
