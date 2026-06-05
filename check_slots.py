@@ -474,9 +474,14 @@ def check_once(state):
         sig = "AVAIL:" + "|".join(sorted(result["dates"])[:20])
         if sig != last_sig:
             dates_preview = ", ".join(result["dates"][:8]) or "see site"
-            msg = ("🟢 Aachen Ausländerbehörde: appointment slot(s) AVAILABLE!\n"
-                   f"Dates/times: {dates_preview}\n"
-                   f"Book now: {BOOKING_URL}")
+            msg = ("🟢 RWTH Studenten Termin AVAILABLE — Aachen!\n"
+                   f"Open: {dates_preview}\n\n"
+                   f"BOOK NOW: {BOOKING_URL}\n\n"
+                   "Path: Ausländer- u. Staatsangehörigkeitsbehörde → Weiter → "
+                   "open 'RWTH - Außenstelle Super C' → RWTH Studenten: press + "
+                   "→ Weiter → OK → choose location → Weiter → pick a time → "
+                   "fill your data → confirm via the email link.\n"
+                   "⚡ Slots vanish in minutes — book immediately!")
             notify(msg)
             state["sig"] = sig
         else:
