@@ -36,6 +36,7 @@ NEGATIVE_PATTERNS = [
     r"leider\s+sind\s+(aktuell|derzeit|momentan)?\s*keine",
     r"no\s+appointments?\s+available",
     r"keine\s+freien\s+zeiten",
+    r"zur\s+zeit\s+keine",
 ]
 
 
@@ -222,13 +223,6 @@ def select_concern(page, chosen):
         suffix = input_id.split("-")[-1] if input_id else ""
         log(f"Concern input id={input_id!r}, suffix={suffix!r}")
 
-        if DISCOVERY:
-            try:
-                row = label.locator("xpath=ancestor::*[.//input][1]")
-                log("CONTAINER HTML:", (row.first.inner_html() or "")[:3000])
-            except Exception as e:
-                log("container html error:", e)
-
         plus_selectors = []
         if suffix:
             plus_selectors = [
@@ -412,17 +406,16 @@ def run():
         click_weiter(page)
         page.wait_for_timeout(2000)
 
-        # Walk through the OK modal, the Standortauswahl (location), and on to
-        # the real appointment-suggestion page. Break only on real slots OR a
-        # 'no appointments' message OR overshoot to the personal-data step.
         for stp in range(8):
             body = page.inner_text("body")
             low = body.lower()
+            m = re.search(r"schritt\s*(\d)\s*von\s*6", low)
+            cur = int(m.group(1)) if m else 0
 
             if DISCOVERY:
                 dump_page(page, f"step3_advance{stp}")
+                log(f"[adv{stp}] current step={cur}")
                 try:
-                    log(f"[adv{stp}] clickables:")
                     for t, r in list_clickables(page)[:40]:
                         log(f"   [{r}] {t}")
                 except Exception:
@@ -434,15 +427,15 @@ def run():
             if find_available_dates(page):
                 log("Real slot candidate(s) detected.")
                 break
-            if "persönliche daten" in low or "schritt 4" in low:
-                log("Overshot to personal-data step — stopping.")
+            if cur >= 4:
+                log(f"Reached step {cur} (personal data) — stopping.")
                 break
 
             if click_exact(page, "OK"):
                 log("Clicked OK (modal).")
                 page.wait_for_timeout(1800)
                 continue
-            if "standort" in low and ("wählen" in low or "standortauswahl" in low):
+            if "standortauswahl" in low:
                 if select_location(page):
                     page.wait_for_timeout(1000)
                 click_weiter(page)
