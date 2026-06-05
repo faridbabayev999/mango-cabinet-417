@@ -1,0 +1,71 @@
+name: Aachen Termin Checker
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      discovery:
+        description: "Set to 1 to dump options/screenshots instead of checking"
+        required: false
+        default: "0"
+
+concurrency:
+  group: termin-checker
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore previous state (dedupe notifications)
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: termin-state-${{ github.run_id }}
+          restore-keys: |
+            termin-state-
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run checker
+        env:
+          BOOKING_URL: ${{ vars.BOOKING_URL }}
+          AUTHORITY_MATCH: ${{ vars.AUTHORITY_MATCH }}
+          CONCERN_MATCH: ${{ vars.CONCERN_MATCH }}
+          DISCOVERY: ${{ github.event.inputs.discovery }}
+          CHECKS_PER_RUN: "2"
+          CHECK_INTERVAL_SECONDS: "120"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+        run: python check_slots.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: termin-state-${{ github.run_id }}
+
+      - name: Upload screenshots/text (for calibration & debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 3
+          if-no-files-found: ignore
