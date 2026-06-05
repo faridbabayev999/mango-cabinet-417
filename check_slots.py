@@ -304,4 +304,119 @@ def run():
                 log(f"  [{r}] {t}")
         if click_by_text(page, AUTHORITY_MATCH):
             log(f"Clicked authority matching '{AUTHORITY_MATCH}'")
-            page.
+            page.wait_for_timeout(2000)
+        else:
+            log(f"Could not find authority '{AUTHORITY_MATCH}'.")
+
+        click_by_text(page, "Weiter", timeout=2500)
+        page.wait_for_timeout(2000)
+
+        dump_page(page, "step2_concern")
+        clickables = list_clickables(page)
+        if DISCOVERY or not CONCERN_MATCH:
+            log("=== STEP 2 concern options ===")
+            for t, r in clickables:
+                log(f"  [{r}] {t}")
+            if not CONCERN_MATCH:
+                log("CONCERN_MATCH empty -> stopping after discovery.")
+                browser.close()
+                return "discovery"
+
+        chosen = None
+        for t, r in clickables:
+            if concern_matches(t, CONCERN_MATCH):
+                chosen = t
+                break
+        if not chosen:
+            log(f"No concern matched '{CONCERN_MATCH}'.")
+            dump_page(page, "step2_nomatch")
+            browser.close()
+            return "no-concern-match"
+
+        expand_category(page, CONCERN_CATEGORY)
+        log(f"Selecting concern: {chosen}")
+        select_concern(page, chosen)
+        page.wait_for_timeout(1000)
+        click_by_text(page, "Weiter", timeout=4000)
+        page.wait_for_timeout(2500)
+
+        for _ in range(3):
+            body_low = page.inner_text("body").lower()
+            if ("terminauswahl" in body_low or "schritt 3" in body_low
+                    or text_has_negative(body_low) or find_available_dates(page)):
+                break
+            click_by_text(page, "Super C", timeout=1500)
+            if not click_by_text(page, "Weiter", timeout=2500):
+                break
+            page.wait_for_timeout(2000)
+
+        page.wait_for_timeout(1500)
+        cal_text = dump_page(page, "step3_calendar")
+        if DISCOVERY:
+            log("=== STEP 3 page text (first 1500 chars) ===")
+            log(cal_text[:1500])
+
+        negative = text_has_negative(cal_text)
+        dates = find_available_dates(page)
+        available = (not negative) and len(dates) > 0
+
+        log(f"Negative message present: {negative}")
+        log(f"Selectable date/time cells: {len(dates)} -> {dates[:10]}")
+        log(f"AVAILABLE = {available}")
+
+        browser.close()
+        return {"available": available, "dates": dates, "negative": negative}
+
+
+def check_once(state):
+    result = run()
+    if isinstance(result, str):
+        return False
+    last_sig = state.get("sig")
+    if result["available"]:
+        sig = "AVAIL:" + "|".join(sorted(result["dates"])[:20])
+        if sig != last_sig:
+            dates_preview = ", ".join(result["dates"][:8]) or "see site"
+            msg = ("🟢 Aachen Ausländerbehörde: appointment slot(s) AVAILABLE!\n"
+                   f"Dates/times: {dates_preview}\n"
+                   f"Book now: {BOOKING_URL}")
+            notify(msg)
+            state["sig"] = sig
+        else:
+            log("Still available, already notified — no repeat alert.")
+    else:
+        if last_sig and last_sig != "NONE":
+            log("Slots gone — state reset.")
+        state["sig"] = "NONE"
+    state["last_check"] = int(time.time())
+    save_state(state)
+    return True
+
+
+def main():
+    checks   = int(os.environ.get("CHECKS_PER_RUN", "1"))
+    interval = int(os.environ.get("CHECK_INTERVAL_SECONDS", "120"))
+    state = load_state()
+    for i in range(max(1, checks)):
+        if i > 0:
+            log(f"--- sleeping {interval}s before check {i + 1}/{checks} ---")
+            time.sleep(interval)
+        log(f"=== Check {i + 1}/{checks} ===")
+        try:
+            real = check_once(state)
+        except PWTimeout as e:
+            log("Timeout this check:", e)
+            continue
+        except Exception as e:
+            log("Error this check:", e)
+            continue
+        if not real:
+            break
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log("Fatal error:", e)
+        sys.exit(0)
