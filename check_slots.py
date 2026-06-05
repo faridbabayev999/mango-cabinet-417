@@ -162,6 +162,9 @@ def expand_category(page, category):
 
 
 def select_concern(page, chosen):
+    """TEVIS number spinner: each concern has a minus button, a number input
+    (id=input-N, name=cnc-N), and a plus button (data-type='plus'). Click the
+    PLUS for this concern to set its count to 1."""
     selected = False
     try:
         label = page.locator(f"label[aria-label={json.dumps(chosen)}]").first
@@ -169,53 +172,64 @@ def select_concern(page, chosen):
             label.scroll_into_view_if_needed(timeout=4000)
         except Exception:
             pass
-        row = label.locator("xpath=ancestor::*[.//input][1]")
+
+        input_id = label.get_attribute("for") or ""
+        suffix = input_id.split("-")[-1] if input_id else ""
+        log(f"Concern input id={input_id!r}, suffix={suffix!r}")
+
         if DISCOVERY:
             try:
+                row = label.locator("xpath=ancestor::*[.//input][1]")
                 log("CONTAINER HTML:", (row.first.inner_html() or "")[:3000])
             except Exception as e:
                 log("container html error:", e)
-        plus = row.locator(
-            "xpath=.//button[normalize-space(.)='+'] "
-            "| .//a[normalize-space(.)='+'] "
-            "| .//span[normalize-space(.)='+'] "
-            "| .//*[contains(@class,'plus') or contains(@class,'increment') "
-            "or contains(@class,'erhoeh')] "
-            "| .//*[contains(@aria-label,'plus') or contains(@aria-label,'mehr') "
-            "or contains(@aria-label,'erhöh') or contains(@aria-label,'Anzahl') "
-            "or contains(@title,'erhöh') or contains(@title,'plus')]")
-        num = row.locator("input[type=number], input.spinner, input")
-        if plus.count() > 0:
-            plus.first.click(timeout=4000)
-            selected = True
-            log(f"Clicked '+' (Plusfeld) for {chosen}.")
-        elif num.count() > 0:
+
+        plus_selectors = []
+        if suffix:
+            plus_selectors = [
+                f"#button-plus-{suffix}",
+                f"button[data-type='plus'][data-field='cnc-{suffix}']",
+                f"#inputBox-{suffix} button[data-type='plus']",
+            ]
+        plus_selectors.append("button[data-type='plus']")
+        for sel in plus_selectors:
             try:
-                num.first.fill("1")
-                num.first.dispatch_event("input")
-                num.first.dispatch_event("change")
-                selected = True
-                log("Set quantity input to 1 (with events).")
+                btn = page.locator(sel).first
+                if btn.count() > 0:
+                    btn.click(timeout=4000)
+                    selected = True
+                    log(f"Clicked plus via '{sel}'.")
+                    break
             except Exception as e:
-                log("number input set failed:", e)
-        if not selected:
-            label.click(timeout=4000)
-            selected = True
-            log("Clicked the concern label directly (fallback).")
+                log(f"plus '{sel}' failed: {e}")
+
+        if not selected and input_id:
+            try:
+                inp = page.locator(f"#{input_id}")
+                inp.fill("1")
+                inp.dispatch_event("input")
+                inp.dispatch_event("change")
+                selected = True
+                log("Set quantity input to 1 (fallback).")
+            except Exception as e:
+                log("input fill failed:", e)
     except Exception as e:
-        log("Concern selection error, will fall back:", e)
+        log("Concern selection error:", e)
+
     if not selected:
         click_by_text(page, chosen)
+
     page.wait_for_timeout(1000)
     if click_by_text(page, "OK", timeout=2500):
         log("Confirmed document popup with OK.")
         page.wait_for_timeout(800)
+
     try:
-        ov = page.inner_text("body")
-        if "noch nicht gesetzt" in ov and chosen.lower() not in ov.lower():
-            log("Overview still shows 'noch nicht gesetzt' — concern may not be set.")
-        else:
-            log("Overview appears to have registered the concern.")
+        ov = page.inner_text("body").lower()
+        if f"0 anliegen {chosen.lower()} ausgewählt" in ov:
+            log("WARNING: overview still shows 0 selected for this concern.")
+        elif "anliegen" in ov and "ausgewählt" in ov:
+            log("Overview shows a non-zero count — concern selected.")
     except Exception:
         pass
 
@@ -353,8 +367,8 @@ def run():
         page.wait_for_timeout(1500)
         cal_text = dump_page(page, "step3_calendar")
         if DISCOVERY:
-            log("=== STEP 3 page text (first 1500 chars) ===")
-            log(cal_text[:1500])
+            log("=== STEP 3 page text (first 2000 chars) ===")
+            log(cal_text[:2000])
 
         negative = text_has_negative(cal_text)
         dates = find_available_dates(page)
