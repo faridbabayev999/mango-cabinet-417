@@ -112,7 +112,6 @@ def dump_page(page, tag):
 
 
 def click_exact(page, label):
-    """Click the first visible, enabled control whose trimmed text/value is EXACTLY `label`."""
     try:
         res = page.evaluate(
             "(lab) => {"
@@ -158,6 +157,27 @@ def click_by_text(page, needle, timeout=8000):
                         return True
                     except Exception:
                         continue
+    return False
+
+
+def select_location(page):
+    """On the Standortauswahl sub-step, select the (usually single) location."""
+    try:
+        radios = page.locator("input[type=radio]")
+        if radios.count() > 0:
+            try:
+                radios.first.check(timeout=2000)
+            except Exception:
+                radios.first.click(timeout=2000)
+            log("Selected location radio.")
+            return True
+    except Exception as e:
+        log("location radio failed:", e)
+    for txt in ["Außenstelle RWTH", "Templergraben", "Standort auswählen",
+                "Auswählen", "auswählen", "Diesen Standort"]:
+        if click_by_text(page, txt, timeout=1500):
+            log(f"Selected location via '{txt}'.")
+            return True
     return False
 
 
@@ -389,36 +409,45 @@ def run():
         select_concern(page, chosen)
         page.wait_for_timeout(1000)
 
-        if DISCOVERY:
-            try:
-                cand = page.evaluate(
-                    "() => [...document.querySelectorAll('button,input,a')]"
-                    ".filter(e=>/eiter/i.test((e.value||'')+(e.textContent||'')"
-                    "+(e.id||'')+(e.className||'')))"
-                    ".map(e=>e.outerHTML.slice(0,160))")
-                log("WEITER CANDIDATES:", cand)
-            except Exception as e:
-                log("weiter cand error:", e)
-
         click_weiter(page)
         page.wait_for_timeout(2000)
 
-        # Walk through the confirmation modal (OK) and any Standort step until
-        # the appointment view (Schritt 3 / Terminauswahl) or a 'no slots' note.
-        for stp in range(6):
-            low = page.inner_text("body").lower()
-            if ("schritt 3" in low or "terminauswahl" in low
-                    or "terminvorschl" in low or text_has_negative(low)):
-                log(f"Reached appointment view after {stp} step(s).")
+        # Walk through the OK modal, the Standortauswahl (location), and on to
+        # the real appointment-suggestion page. Break only on real slots OR a
+        # 'no appointments' message OR overshoot to the personal-data step.
+        for stp in range(8):
+            body = page.inner_text("body")
+            low = body.lower()
+
+            if DISCOVERY:
+                dump_page(page, f"step3_advance{stp}")
+                try:
+                    log(f"[adv{stp}] clickables:")
+                    for t, r in list_clickables(page)[:40]:
+                        log(f"   [{r}] {t}")
+                except Exception:
+                    pass
+
+            if text_has_negative(low):
+                log("No-appointment message detected.")
                 break
-            dump_page(page, f"step2c_advance{stp}")
+            if find_available_dates(page):
+                log("Real slot candidate(s) detected.")
+                break
+            if "persönliche daten" in low or "schritt 4" in low:
+                log("Overshot to personal-data step — stopping.")
+                break
+
             if click_exact(page, "OK"):
                 log("Clicked OK (modal).")
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1800)
                 continue
-            if click_by_text(page, "Super C", timeout=1500):
-                log("Selected Super C location.")
-                page.wait_for_timeout(1000)
+            if "standort" in low and ("wählen" in low or "standortauswahl" in low):
+                if select_location(page):
+                    page.wait_for_timeout(1000)
+                click_weiter(page)
+                page.wait_for_timeout(2500)
+                continue
             if not click_weiter(page):
                 log("No further 'Weiter' — stopping advance.")
                 break
@@ -427,7 +456,7 @@ def run():
         page.wait_for_timeout(1500)
         cal_text = dump_page(page, "step3_calendar")
         if DISCOVERY:
-            log("=== STEP 3 page text (first 2500 chars) ===")
+            log("=== FINAL page text (first 2500 chars) ===")
             log(cal_text[:2500])
 
         negative = text_has_negative(cal_text)
