@@ -136,54 +136,72 @@ def click_by_text(page, needle, timeout=8000):
 def expand_category(page, category):
     if not category:
         return
-    if click_by_text(page, category, timeout=5000):
-        log(f"Expanded category containing '{category}'.")
+    try:
+        loc = page.get_by_text(category, exact=False).first
+        loc.scroll_into_view_if_needed(timeout=3000)
+        loc.click(timeout=4000)
+        log(f"Expanded category '{category}'.")
         page.wait_for_timeout(1500)
         dump_page(page, "step2b_category")
-    else:
-        log(f"Could not find category '{category}' to expand.")
+        return
+    except Exception as e:
+        log(f"get_by_text expand failed ({e}); trying JS fallback.")
+    try:
+        clicked = page.evaluate(
+            """(cat) => {
+                const els = [...document.querySelectorAll('button,a,li,div,span,h2,h3,[role=tab]')];
+                const t = els.find(e => (e.textContent||'').trim().includes(cat));
+                if (t) { t.click(); return true; }
+                return false;
+            }""", category)
+        log(f"JS category expand clicked={clicked}")
+        page.wait_for_timeout(1500)
+        dump_page(page, "step2b_category")
+    except Exception as e:
+        log("JS expand failed:", e)
 
 
 def select_concern(page, chosen):
     selected = False
     try:
-        label = page.get_by_text(chosen, exact=True).first
+        label = page.locator(f"label[aria-label={json.dumps(chosen)}]").first
         try:
-            label.scroll_into_view_if_needed(timeout=3000)
+            label.scroll_into_view_if_needed(timeout=4000)
         except Exception:
             pass
-        row = label.locator("xpath=ancestor-or-self::*[self::li or self::tr or self::div][1]")
+        row = label.locator("xpath=ancestor::*[.//input][1]")
         if DISCOVERY:
             try:
-                log("ROW HTML:", (row.first.inner_html() or "")[:1200])
+                log("CONTAINER HTML:", (row.first.inner_html() or "")[:3000])
             except Exception as e:
-                log("row html error:", e)
-        sel = row.locator("select")
+                log("container html error:", e)
         plus = row.locator(
-            "xpath=.//*[normalize-space(.)='+' or contains(@aria-label,'plus') "
-            "or contains(@aria-label,'mehr') or contains(@aria-label,'erhöh') "
-            "or contains(@title,'plus') or contains(@class,'plus') "
-            "or contains(@class,'increment')]")
-        num = row.locator("input[type=number]")
-        if sel.count() > 0:
+            "xpath=.//button[normalize-space(.)='+'] "
+            "| .//a[normalize-space(.)='+'] "
+            "| .//span[normalize-space(.)='+'] "
+            "| .//*[contains(@class,'plus') or contains(@class,'increment') "
+            "or contains(@class,'erhoeh')] "
+            "| .//*[contains(@aria-label,'plus') or contains(@aria-label,'mehr') "
+            "or contains(@aria-label,'erhöh') or contains(@aria-label,'Anzahl') "
+            "or contains(@title,'erhöh') or contains(@title,'plus')]")
+        num = row.locator("input[type=number], input.spinner, input")
+        if plus.count() > 0:
+            plus.first.click(timeout=4000)
+            selected = True
+            log(f"Clicked '+' (Plusfeld) for {chosen}.")
+        elif num.count() > 0:
             try:
-                sel.first.select_option("1"); selected = True
-                log("Set quantity dropdown to 1.")
-            except Exception:
-                try:
-                    sel.first.select_option(index=1); selected = True
-                    log("Set quantity dropdown to index 1.")
-                except Exception as e:
-                    log("dropdown select failed:", e)
-        if not selected and plus.count() > 0:
-            plus.first.click(timeout=4000); selected = True
-            log("Clicked '+' in the concern row.")
-        if not selected and num.count() > 0:
-            num.first.fill("1"); selected = True
-            log("Set quantity number input to 1.")
+                num.first.fill("1")
+                num.first.dispatch_event("input")
+                num.first.dispatch_event("change")
+                selected = True
+                log("Set quantity input to 1 (with events).")
+            except Exception as e:
+                log("number input set failed:", e)
         if not selected:
-            label.click(timeout=4000); selected = True
-            log("Clicked the concern label directly.")
+            label.click(timeout=4000)
+            selected = True
+            log("Clicked the concern label directly (fallback).")
     except Exception as e:
         log("Concern selection error, will fall back:", e)
     if not selected:
@@ -192,6 +210,14 @@ def select_concern(page, chosen):
     if click_by_text(page, "OK", timeout=2500):
         log("Confirmed document popup with OK.")
         page.wait_for_timeout(800)
+    try:
+        ov = page.inner_text("body")
+        if "noch nicht gesetzt" in ov and chosen.lower() not in ov.lower():
+            log("Overview still shows 'noch nicht gesetzt' — concern may not be set.")
+        else:
+            log("Overview appears to have registered the concern.")
+    except Exception:
+        pass
 
 
 def list_clickables(page):
@@ -278,119 +304,4 @@ def run():
                 log(f"  [{r}] {t}")
         if click_by_text(page, AUTHORITY_MATCH):
             log(f"Clicked authority matching '{AUTHORITY_MATCH}'")
-            page.wait_for_timeout(2000)
-        else:
-            log(f"Could not find authority '{AUTHORITY_MATCH}'.")
-
-        click_by_text(page, "Weiter", timeout=2500)
-        page.wait_for_timeout(2000)
-
-        dump_page(page, "step2_concern")
-        clickables = list_clickables(page)
-        if DISCOVERY or not CONCERN_MATCH:
-            log("=== STEP 2 concern options ===")
-            for t, r in clickables:
-                log(f"  [{r}] {t}")
-            if not CONCERN_MATCH:
-                log("CONCERN_MATCH empty -> stopping after discovery.")
-                browser.close()
-                return "discovery"
-
-        chosen = None
-        for t, r in clickables:
-            if concern_matches(t, CONCERN_MATCH):
-                chosen = t
-                break
-        if not chosen:
-            log(f"No concern matched '{CONCERN_MATCH}'.")
-            dump_page(page, "step2_nomatch")
-            browser.close()
-            return "no-concern-match"
-
-        expand_category(page, CONCERN_CATEGORY)
-        log(f"Selecting concern: {chosen}")
-        select_concern(page, chosen)
-        page.wait_for_timeout(1000)
-        click_by_text(page, "Weiter", timeout=4000)
-        page.wait_for_timeout(2500)
-
-        for _ in range(3):
-            body_low = page.inner_text("body").lower()
-            if ("terminauswahl" in body_low or "schritt 3" in body_low
-                    or text_has_negative(body_low) or find_available_dates(page)):
-                break
-            click_by_text(page, "Super C", timeout=1500)
-            if not click_by_text(page, "Weiter", timeout=2500):
-                break
-            page.wait_for_timeout(2000)
-
-        page.wait_for_timeout(1500)
-        cal_text = dump_page(page, "step3_calendar")
-        if DISCOVERY:
-            log("=== STEP 3 page text (first 1500 chars) ===")
-            log(cal_text[:1500])
-
-        negative = text_has_negative(cal_text)
-        dates = find_available_dates(page)
-        available = (not negative) and len(dates) > 0
-
-        log(f"Negative message present: {negative}")
-        log(f"Selectable date/time cells: {len(dates)} -> {dates[:10]}")
-        log(f"AVAILABLE = {available}")
-
-        browser.close()
-        return {"available": available, "dates": dates, "negative": negative}
-
-
-def check_once(state):
-    result = run()
-    if isinstance(result, str):
-        return False
-    last_sig = state.get("sig")
-    if result["available"]:
-        sig = "AVAIL:" + "|".join(sorted(result["dates"])[:20])
-        if sig != last_sig:
-            dates_preview = ", ".join(result["dates"][:8]) or "see site"
-            msg = ("🟢 Aachen Ausländerbehörde: appointment slot(s) AVAILABLE!\n"
-                   f"Dates/times: {dates_preview}\n"
-                   f"Book now: {BOOKING_URL}")
-            notify(msg)
-            state["sig"] = sig
-        else:
-            log("Still available, already notified — no repeat alert.")
-    else:
-        if last_sig and last_sig != "NONE":
-            log("Slots gone — state reset.")
-        state["sig"] = "NONE"
-    state["last_check"] = int(time.time())
-    save_state(state)
-    return True
-
-
-def main():
-    checks   = int(os.environ.get("CHECKS_PER_RUN", "1"))
-    interval = int(os.environ.get("CHECK_INTERVAL_SECONDS", "120"))
-    state = load_state()
-    for i in range(max(1, checks)):
-        if i > 0:
-            log(f"--- sleeping {interval}s before check {i + 1}/{checks} ---")
-            time.sleep(interval)
-        log(f"=== Check {i + 1}/{checks} ===")
-        try:
-            real = check_once(state)
-        except PWTimeout as e:
-            log("Timeout this check:", e)
-            continue
-        except Exception as e:
-            log("Error this check:", e)
-            continue
-        if not real:
-            break
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        log("Fatal error:", e)
-        sys.exit(0)
+            page.
