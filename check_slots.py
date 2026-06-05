@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-Aachen Ausländerbehörde appointment-slot checker.
-
-Walks the VOIS|TEVIS booking wizard at the StädteRegion Aachen Ausländeramt,
-detects whether any appointment slots are currently bookable for the chosen
-"Anliegen" (concern), and sends a Telegram + WhatsApp (CallMeBot) alert ONLY
-when slots are available — and only once per change (no spam).
-"""
+"""Aachen Ausländerbehörde appointment-slot checker."""
 
 import os
 import re
@@ -22,6 +15,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 BOOKING_URL     = os.environ.get("BOOKING_URL", "https://termine.staedteregion-aachen.de/auslaenderamt/")
 AUTHORITY_MATCH = os.environ.get("AUTHORITY_MATCH", "Ausländer")
 CONCERN_MATCH   = os.environ.get("CONCERN_MATCH", "")
+CONCERN_CATEGORY = os.environ.get("CONCERN_CATEGORY", "Super C")
 
 DISCOVERY = os.environ.get("DISCOVERY", "") not in ("", "0", "false", "False")
 HEADLESS  = os.environ.get("HEADLESS", "1") not in ("0", "false", "False")
@@ -55,8 +49,7 @@ def notify_telegram(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = urllib.parse.urlencode({
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
+            "chat_id": TELEGRAM_CHAT_ID, "text": text,
             "disable_web_page_preview": "false",
         }).encode()
         urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20)
@@ -70,12 +63,9 @@ def notify_whatsapp(text):
         return
     try:
         params = urllib.parse.urlencode({
-            "phone": CALLMEBOT_PHONE,
-            "text": text,
-            "apikey": CALLMEBOT_APIKEY,
+            "phone": CALLMEBOT_PHONE, "text": text, "apikey": CALLMEBOT_APIKEY,
         })
-        url = f"https://api.callmebot.com/whatsapp.php?{params}"
-        urllib.request.urlopen(url, timeout=20)
+        urllib.request.urlopen(f"https://api.callmebot.com/whatsapp.php?{params}", timeout=20)
         log("WhatsApp alert sent.")
     except Exception as e:
         log("WhatsApp error:", e)
@@ -143,36 +133,61 @@ def click_by_text(page, needle, timeout=8000):
     return False
 
 
+def expand_category(page, category):
+    if not category:
+        return
+    if click_by_text(page, category, timeout=5000):
+        log(f"Expanded category containing '{category}'.")
+        page.wait_for_timeout(1500)
+        dump_page(page, "step2b_category")
+    else:
+        log(f"Could not find category '{category}' to expand.")
+
+
 def select_concern(page, chosen):
-    """Click the '+' in the chosen concern's OWN row, then confirm any popup."""
     selected = False
     try:
         label = page.get_by_text(chosen, exact=True).first
-        label.scroll_into_view_if_needed(timeout=4000)
-        row = label.locator(
-            "xpath=ancestor-or-self::*[self::li or self::tr or self::div][1]")
+        try:
+            label.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        row = label.locator("xpath=ancestor-or-self::*[self::li or self::tr or self::div][1]")
+        if DISCOVERY:
+            try:
+                log("ROW HTML:", (row.first.inner_html() or "")[:1200])
+            except Exception as e:
+                log("row html error:", e)
+        sel = row.locator("select")
         plus = row.locator(
             "xpath=.//*[normalize-space(.)='+' or contains(@aria-label,'plus') "
             "or contains(@aria-label,'mehr') or contains(@aria-label,'erhöh') "
-            "or contains(@title,'plus')]")
-        if plus.count() > 0:
-            plus.first.click(timeout=4000)
-            selected = True
-            log("Clicked '+' in the chosen concern row.")
-        elif row.locator("input[type=number]").count() > 0:
-            row.locator("input[type=number]").first.fill("1")
-            selected = True
-            log("Set quantity input to 1.")
-        else:
-            label.click(timeout=4000)
-            selected = True
+            "or contains(@title,'plus') or contains(@class,'plus') "
+            "or contains(@class,'increment')]")
+        num = row.locator("input[type=number]")
+        if sel.count() > 0:
+            try:
+                sel.first.select_option("1"); selected = True
+                log("Set quantity dropdown to 1.")
+            except Exception:
+                try:
+                    sel.first.select_option(index=1); selected = True
+                    log("Set quantity dropdown to index 1.")
+                except Exception as e:
+                    log("dropdown select failed:", e)
+        if not selected and plus.count() > 0:
+            plus.first.click(timeout=4000); selected = True
+            log("Clicked '+' in the concern row.")
+        if not selected and num.count() > 0:
+            num.first.fill("1"); selected = True
+            log("Set quantity number input to 1.")
+        if not selected:
+            label.click(timeout=4000); selected = True
             log("Clicked the concern label directly.")
     except Exception as e:
-        log("Row-scoped selection failed, falling back:", e)
-
+        log("Concern selection error, will fall back:", e)
     if not selected:
         click_by_text(page, chosen)
-
     page.wait_for_timeout(1000)
     if click_by_text(page, "OK", timeout=2500):
         log("Confirmed document popup with OK.")
@@ -194,8 +209,7 @@ def list_clickables(page):
     seen, uniq = set(), []
     for t, r in out:
         if (t, r) not in seen:
-            seen.add((t, r))
-            uniq.append((t, r))
+            seen.add((t, r)); uniq.append((t, r))
     return uniq
 
 
@@ -215,13 +229,10 @@ def text_has_negative(txt):
 
 def find_available_dates(page):
     dates = []
-    candidate_selectors = [
-        "td.buchbar", "td.frei", ".available", ".bookable",
-        "button[aria-disabled=false]", "a.suggestion", ".suggestion",
-        "td[role=gridcell]:not([aria-disabled=true])",
-        "button.timeslot", ".timeslot:not(.disabled)",
-    ]
-    for sel in candidate_selectors:
+    for sel in ["td.buchbar", "td.frei", ".available", ".bookable",
+                "button[aria-disabled=false]", "a.suggestion", ".suggestion",
+                "td[role=gridcell]:not([aria-disabled=true])",
+                "button.timeslot", ".timeslot:not(.disabled)"]:
         try:
             for el in page.query_selector_all(sel):
                 if not el.is_visible():
@@ -234,8 +245,7 @@ def find_available_dates(page):
     seen, uniq = set(), []
     for d in dates:
         if d not in seen:
-            seen.add(d)
-            uniq.append(d)
+            seen.add(d); uniq.append(d)
     return uniq
 
 
@@ -261,7 +271,6 @@ def run():
                 page.wait_for_timeout(800)
                 break
 
-        # Step 1: authority
         dump_page(page, "step1_authority")
         if DISCOVERY:
             log("=== STEP 1 clickables ===")
@@ -276,15 +285,14 @@ def run():
         click_by_text(page, "Weiter", timeout=2500)
         page.wait_for_timeout(2000)
 
-        # Step 2: concern
         dump_page(page, "step2_concern")
         clickables = list_clickables(page)
         if DISCOVERY or not CONCERN_MATCH:
-            log("=== STEP 2 concern options (pick one for CONCERN_MATCH) ===")
+            log("=== STEP 2 concern options ===")
             for t, r in clickables:
                 log(f"  [{r}] {t}")
             if not CONCERN_MATCH:
-                log("\nCONCERN_MATCH is empty -> stopping after discovery.")
+                log("CONCERN_MATCH empty -> stopping after discovery.")
                 browser.close()
                 return "discovery"
 
@@ -294,20 +302,28 @@ def run():
                 chosen = t
                 break
         if not chosen:
-            log(f"No concern matched '{CONCERN_MATCH}'. Options were:")
-            for t, r in clickables:
-                log("   -", t)
+            log(f"No concern matched '{CONCERN_MATCH}'.")
             dump_page(page, "step2_nomatch")
             browser.close()
             return "no-concern-match"
 
+        expand_category(page, CONCERN_CATEGORY)
         log(f"Selecting concern: {chosen}")
         select_concern(page, chosen)
         page.wait_for_timeout(1000)
         click_by_text(page, "Weiter", timeout=4000)
         page.wait_for_timeout(2500)
 
-        # Step 3: calendar
+        for _ in range(3):
+            body_low = page.inner_text("body").lower()
+            if ("terminauswahl" in body_low or "schritt 3" in body_low
+                    or text_has_negative(body_low) or find_available_dates(page)):
+                break
+            click_by_text(page, "Super C", timeout=1500)
+            if not click_by_text(page, "Weiter", timeout=2500):
+                break
+            page.wait_for_timeout(2000)
+
         page.wait_for_timeout(1500)
         cal_text = dump_page(page, "step3_calendar")
         if DISCOVERY:
