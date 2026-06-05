@@ -6,14 +6,6 @@ Walks the VOIS|TEVIS booking wizard at the StädteRegion Aachen Ausländeramt,
 detects whether any appointment slots are currently bookable for the chosen
 "Anliegen" (concern), and sends a Telegram + WhatsApp (CallMeBot) alert ONLY
 when slots are available — and only once per change (no spam).
-
-Designed to run on GitHub Actions. To get a finer cadence than GitHub's 5-min
-minimum cron, the run does several checks internally (CHECKS_PER_RUN), sleeping
-CHECK_INTERVAL_SECONDS between them (e.g. 2 checks * 120s ≈ one check / 2 min).
-
-First-run calibration: set DISCOVERY=1 to make the bot print every option it
-sees at each step (and save screenshots) instead of trying to detect slots.
-Use that output to pick the exact CONCERN_MATCH text for RWTH students.
 """
 
 import os
@@ -27,14 +19,8 @@ import urllib.request
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ----------------------------------------------------------------------------
-# Configuration (all via environment variables / GitHub Secrets & Variables)
-# ----------------------------------------------------------------------------
 BOOKING_URL     = os.environ.get("BOOKING_URL", "https://termine.staedteregion-aachen.de/auslaenderamt/")
-AUTHORITY_MATCH = os.environ.get("AUTHORITY_MATCH", "Ausländer")  # step 1 button text
-# Groups separated by ';'; words in a group separated by ','. A concern label
-# matches if ALL words of ANY group are substrings of it.
-# Example: "Aufenthalt,Studierende" or "RWTH" or "Verlängerung,Studierende;Aufenthaltstitel,RWTH"
+AUTHORITY_MATCH = os.environ.get("AUTHORITY_MATCH", "Ausländer")
 CONCERN_MATCH   = os.environ.get("CONCERN_MATCH", "")
 
 DISCOVERY = os.environ.get("DISCOVERY", "") not in ("", "0", "false", "False")
@@ -43,13 +29,11 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 ART_DIR    = pathlib.Path(os.environ.get("ARTIFACT_DIR", "artifacts"))
 ART_DIR.mkdir(parents=True, exist_ok=True)
 
-# Notification secrets
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-CALLMEBOT_PHONE    = os.environ.get("CALLMEBOT_PHONE", "")   # e.g. +491234567890
+CALLMEBOT_PHONE    = os.environ.get("CALLMEBOT_PHONE", "")
 CALLMEBOT_APIKEY   = os.environ.get("CALLMEBOT_APIKEY", "")
 
-# German phrases that mean "no appointments available"
 NEGATIVE_PATTERNS = [
     r"kein[e]?\s+frei[en]*\s+termin",
     r"keine\s+termine",
@@ -61,9 +45,6 @@ NEGATIVE_PATTERNS = [
 ]
 
 
-# ----------------------------------------------------------------------------
-# Notifications
-# ----------------------------------------------------------------------------
 def log(*a):
     print(*a, flush=True)
 
@@ -106,9 +87,6 @@ def notify(text):
     notify_whatsapp(text)
 
 
-# ----------------------------------------------------------------------------
-# State (dedupe so we only alert on change)
-# ----------------------------------------------------------------------------
 def load_state():
     try:
         with open(STATE_FILE) as f:
@@ -125,15 +103,15 @@ def save_state(state):
         log("State save error:", e)
 
 
-# ----------------------------------------------------------------------------
-# Wizard helpers
-# ----------------------------------------------------------------------------
 def dump_page(page, tag):
-    """Save screenshot + text for calibration / debugging."""
     try:
         page.screenshot(path=str(ART_DIR / f"{tag}.png"), full_page=True)
     except Exception as e:
         log("screenshot error:", e)
+    try:
+        (ART_DIR / f"{tag}.html").write_text(page.content(), encoding="utf-8")
+    except Exception:
+        pass
     try:
         txt = page.inner_text("body")
         (ART_DIR / f"{tag}.txt").write_text(txt, encoding="utf-8")
@@ -143,30 +121,7 @@ def dump_page(page, tag):
         return ""
 
 
-def list_clickables(page):
-    """Return [(text, role)] of buttons/links/options on the page."""
-    out = []
-    for sel, role in [("button", "button"), ("a", "link"),
-                      ("[role=button]", "button"), ("[role=option]", "option"),
-                      ("label", "label"), ("li", "li")]:
-        try:
-            for el in page.query_selector_all(sel):
-                t = (el.inner_text() or "").strip()
-                if t and len(t) < 160:
-                    out.append((t, role))
-        except Exception:
-            pass
-    seen, uniq = set(), []
-    for t, r in out:
-        k = (t, r)
-        if k not in seen:
-            seen.add(k)
-            uniq.append((t, r))
-    return uniq
-
-
 def click_by_text(page, needle, timeout=8000):
-    """Click the first visible element containing `needle` (case-insensitive)."""
     needle_l = needle.lower()
     for sel in ["button", "a", "[role=button]", "[role=option]", "label", "li"]:
         for el in page.query_selector_all(sel):
@@ -188,6 +143,62 @@ def click_by_text(page, needle, timeout=8000):
     return False
 
 
+def select_concern(page, chosen):
+    """Click the '+' in the chosen concern's OWN row, then confirm any popup."""
+    selected = False
+    try:
+        label = page.get_by_text(chosen, exact=True).first
+        label.scroll_into_view_if_needed(timeout=4000)
+        row = label.locator(
+            "xpath=ancestor-or-self::*[self::li or self::tr or self::div][1]")
+        plus = row.locator(
+            "xpath=.//*[normalize-space(.)='+' or contains(@aria-label,'plus') "
+            "or contains(@aria-label,'mehr') or contains(@aria-label,'erhöh') "
+            "or contains(@title,'plus')]")
+        if plus.count() > 0:
+            plus.first.click(timeout=4000)
+            selected = True
+            log("Clicked '+' in the chosen concern row.")
+        elif row.locator("input[type=number]").count() > 0:
+            row.locator("input[type=number]").first.fill("1")
+            selected = True
+            log("Set quantity input to 1.")
+        else:
+            label.click(timeout=4000)
+            selected = True
+            log("Clicked the concern label directly.")
+    except Exception as e:
+        log("Row-scoped selection failed, falling back:", e)
+
+    if not selected:
+        click_by_text(page, chosen)
+
+    page.wait_for_timeout(1000)
+    if click_by_text(page, "OK", timeout=2500):
+        log("Confirmed document popup with OK.")
+        page.wait_for_timeout(800)
+
+
+def list_clickables(page):
+    out = []
+    for sel, role in [("button", "button"), ("a", "link"),
+                      ("[role=button]", "button"), ("[role=option]", "option"),
+                      ("label", "label"), ("li", "li")]:
+        try:
+            for el in page.query_selector_all(sel):
+                t = (el.inner_text() or "").strip()
+                if t and len(t) < 160:
+                    out.append((t, role))
+        except Exception:
+            pass
+    seen, uniq = set(), []
+    for t, r in out:
+        if (t, r) not in seen:
+            seen.add((t, r))
+            uniq.append((t, r))
+    return uniq
+
+
 def concern_matches(label, match_cfg):
     label_l = label.lower()
     for group in match_cfg.split(";"):
@@ -203,7 +214,6 @@ def text_has_negative(txt):
 
 
 def find_available_dates(page):
-    """Heuristic: collect text of enabled/selectable day or time cells."""
     dates = []
     candidate_selectors = [
         "td.buchbar", "td.frei", ".available", ".bookable",
@@ -229,9 +239,6 @@ def find_available_dates(page):
     return uniq
 
 
-# ----------------------------------------------------------------------------
-# One pass through the wizard
-# ----------------------------------------------------------------------------
 def run():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
@@ -248,14 +255,13 @@ def run():
         page.goto(BOOKING_URL, wait_until="domcontentloaded")
         page.wait_for_timeout(2500)
 
-        # Dismiss cookie banner if present
         for c in ["Alle akzeptieren", "Akzeptieren", "Einverstanden",
                   "Nur notwendige", "Ablehnen", "Schließen", "OK"]:
             if click_by_text(page, c, timeout=2000):
                 page.wait_for_timeout(800)
                 break
 
-        # ---- Step 1: choose authority -------------------------------------
+        # Step 1: authority
         dump_page(page, "step1_authority")
         if DISCOVERY:
             log("=== STEP 1 clickables ===")
@@ -265,12 +271,12 @@ def run():
             log(f"Clicked authority matching '{AUTHORITY_MATCH}'")
             page.wait_for_timeout(2000)
         else:
-            log(f"Could not find authority '{AUTHORITY_MATCH}'. (May be single-authority.)")
+            log(f"Could not find authority '{AUTHORITY_MATCH}'.")
 
         click_by_text(page, "Weiter", timeout=2500)
         page.wait_for_timeout(2000)
 
-        # ---- Step 2: choose concern ("Anliegen") --------------------------
+        # Step 2: concern
         dump_page(page, "step2_concern")
         clickables = list_clickables(page)
         if DISCOVERY or not CONCERN_MATCH:
@@ -278,8 +284,7 @@ def run():
             for t, r in clickables:
                 log(f"  [{r}] {t}")
             if not CONCERN_MATCH:
-                log("\nCONCERN_MATCH is empty -> stopping after discovery. "
-                    "Set CONCERN_MATCH and re-run.")
+                log("\nCONCERN_MATCH is empty -> stopping after discovery.")
                 browser.close()
                 return "discovery"
 
@@ -297,14 +302,12 @@ def run():
             return "no-concern-match"
 
         log(f"Selecting concern: {chosen}")
-        # TEVIS often needs a quantity '+' next to the concern, then 'Weiter'.
-        if not click_by_text(page, "+", timeout=2000):
-            click_by_text(page, chosen)
-        page.wait_for_timeout(1200)
+        select_concern(page, chosen)
+        page.wait_for_timeout(1000)
         click_by_text(page, "Weiter", timeout=4000)
         page.wait_for_timeout(2500)
 
-        # ---- Step 3: calendar / suggestions -------------------------------
+        # Step 3: calendar
         page.wait_for_timeout(1500)
         cal_text = dump_page(page, "step3_calendar")
         if DISCOVERY:
@@ -313,28 +316,20 @@ def run():
 
         negative = text_has_negative(cal_text)
         dates = find_available_dates(page)
-        # Conservative: only "available" when there are selectable cells AND no
-        # explicit "no appointments" message. Avoids false alarms.
         available = (not negative) and len(dates) > 0
 
         log(f"Negative message present: {negative}")
-        log(f"Selectable date/time cells found: {len(dates)} -> {dates[:10]}")
+        log(f"Selectable date/time cells: {len(dates)} -> {dates[:10]}")
         log(f"AVAILABLE = {available}")
 
         browser.close()
         return {"available": available, "dates": dates, "negative": negative}
 
 
-# ----------------------------------------------------------------------------
-# Check + notify (with dedupe), and the multi-check loop
-# ----------------------------------------------------------------------------
 def check_once(state):
-    """Run one check and send alerts based on change vs. stored state.
-    Returns True if this was a real check (not discovery/no-match)."""
     result = run()
-    if isinstance(result, str):  # discovery / no-match
+    if isinstance(result, str):
         return False
-
     last_sig = state.get("sig")
     if result["available"]:
         sig = "AVAIL:" + "|".join(sorted(result["dates"])[:20])
@@ -346,23 +341,19 @@ def check_once(state):
             notify(msg)
             state["sig"] = sig
         else:
-            log("Still available, already notified for this set — no repeat alert.")
+            log("Still available, already notified — no repeat alert.")
     else:
         if last_sig and last_sig != "NONE":
             log("Slots gone — state reset.")
         state["sig"] = "NONE"
-
     state["last_check"] = int(time.time())
     save_state(state)
     return True
 
 
 def main():
-    # Finer cadence than GitHub's 5-min cron: several checks per run, sleeping
-    # CHECK_INTERVAL_SECONDS between them (2 checks * 120s ≈ one check / 2 min).
     checks   = int(os.environ.get("CHECKS_PER_RUN", "1"))
     interval = int(os.environ.get("CHECK_INTERVAL_SECONDS", "120"))
-
     state = load_state()
     for i in range(max(1, checks)):
         if i > 0:
@@ -372,13 +363,13 @@ def main():
         try:
             real = check_once(state)
         except PWTimeout as e:
-            log("Timeout this check (site slow/layout changed):", e)
+            log("Timeout this check:", e)
             continue
         except Exception as e:
             log("Error this check:", e)
             continue
         if not real:
-            break  # discovery mode or no concern match — no point looping
+            break
 
 
 if __name__ == "__main__":
@@ -386,4 +377,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         log("Fatal error:", e)
-        sys.exit(0)  # never fail the Action on a transient error
+        sys.exit(0)
