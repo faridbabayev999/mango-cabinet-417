@@ -19,7 +19,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 32
+    timeout-minutes: 65
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,9 +48,9 @@ jobs:
           AUTHORITY_MATCH: ${{ vars.AUTHORITY_MATCH }}
           CONCERN_MATCH: ${{ vars.CONCERN_MATCH }}
           DISCOVERY: ${{ github.event.inputs.discovery }}
-          # Each run keeps checking every 2 min for ~25-30 min, bridging the gap
-          # until GitHub's (often late) next scheduled run takes over.
-          CHECKS_PER_RUN: "12"
+          # Each run keeps checking every 2 min for ~60 min, bridging GitHub's
+          # sparse scheduler until the next run cancels/replaces this one.
+          CHECKS_PER_RUN: "24"
           CHECK_INTERVAL_SECONDS: "120"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
